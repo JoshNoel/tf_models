@@ -83,7 +83,10 @@ def bottleneck(inputs,
                rate=1,
                outputs_collections=None,
                scope=None,
-               use_bounded_activations=False):
+               use_bounded_activations=False,
+               initializers=None,
+               insert_shift=False,
+               split_model=False):
   """Bottleneck residual unit variant with BN after convolutions.
 
   This is the original residual unit proposed in [1]. See Fig. 1(a) of [2] for
@@ -104,34 +107,75 @@ def bottleneck(inputs,
     scope: Optional variable_scope.
     use_bounded_activations: Whether or not to use bounded activations. Bounded
       activations better lend themselves to quantized inference.
+    initializers <MODIFICATION>: Weight and bias initializers for the included conv blocks
+    insert_shift <MODIFICATION>: If true, inserts shift operation in front of every first conv1x1 within a block.
+    split_model <MODIFICATION>: (overrides "shift") If true, inserts placeholder in front of every first conv1x1 within a block. This allows for insertion of shift outside of TF.
 
   Returns:
     The ResNet unit's output.
   """
   with tf.variable_scope(scope, 'bottleneck_v1', [inputs]) as sc:
+    fake_inputs = None
+    fake_shortcut = None
+    if split_model:
+        shift_input = tf.identity(inputs, 'prev_conv_output')
+        #shortcut_input = tf.identity(shortcut, 'prev_shortcut_output')
+        shortcut_input = tf.identity(inputs, 'prev_shortcut_output')
+        fake_inputs = tf.placeholder(tf.float32, shape=inputs.get_shape(), name='conv_input')
+        #fake_shortcut = tf.placeholder(tf.float32, shape=shortcut.get_shape(), name='shortcut_input')
+        fake_shortcut = tf.placeholder(tf.float32, shape=inputs.get_shape(), name='shortcut_input')
+    elif insert_shift:
+        shift_input = tf.identity(inputs, 'prev_conv_output')
+        #shortcut_input = tf.identity(shortcut, 'prev_shortcut_output')
+        shortcut_input = tf.identity(inputs, 'prev_shortcut_output')
+
+        fold = inputs.get_shape()[-1]//8
+        shifted = tf.Variable(tf.zeros_like(inputs))
+
+        initial_print = tf.print("initial: ", shifted)
+        shift_left = tf.assign(shifted[:-1, :, :, :fold], shift_input[1:, :, :, :fold])
+        shift_right = tf.assign(shifted[1:, :, :, fold: 2 * fold], shift_input[:-1, :, :, fold: 2 * fold])
+        shift_copy = tf.assign(shifted[:, :, :, 2 * fold:], shift_input[:, :, :, 2 * fold:])
+        final_print = tf.print("final: ", shifted)
+
+        with tf.control_dependencies([shift_left, shift_right, shift_copy]):
+            fake_inputs = tf.identity(shifted, 'shifted_input')
+        fake_shortcut = shortcut_input
+    else:
+        fake_inputs = inputs
+        #fake_shortcut = shortcut
+        fake_shortcut = inputs
+
     depth_in = slim.utils.last_dimension(inputs.get_shape(), min_rank=4)
     if depth == depth_in:
-      shortcut = resnet_utils.subsample(inputs, stride, 'shortcut')
+      #shortcut = resnet_utils.subsample(inputs, stride, 'shortcut')
+      shortcut = resnet_utils.subsample(fake_shortcut, stride, 'shortcut')
     else:
       shortcut = slim.conv2d(
-          inputs,
+          #inputs,
+          fake_shortcut,
           depth, [1, 1],
           stride=stride,
           activation_fn=tf.nn.relu6 if use_bounded_activations else None,
-          scope='shortcut')
+          scope='shortcut',
+          **initializers["shortcut"])
 
-    residual = slim.conv2d(inputs, depth_bottleneck, [1, 1], stride=1,
-                           scope='conv1')
+
+
+    residual = slim.conv2d(fake_inputs, depth_bottleneck, [1, 1], stride=1,
+                           scope='conv1', **initializers["conv1"])
     residual = resnet_utils.conv2d_same(residual, depth_bottleneck, 3, stride,
-                                        rate=rate, scope='conv2')
+                                        rate=rate, scope='conv2', **initializers["conv2"])
     residual = slim.conv2d(residual, depth, [1, 1], stride=1,
-                           activation_fn=None, scope='conv3')
+                           activation_fn=None, scope='conv3', **initializers["conv3"])
 
     if use_bounded_activations:
       # Use clip_by_value to simulate bandpass activation.
       residual = tf.clip_by_value(residual, -6.0, 6.0)
+      #output = tf.nn.relu6(fake_shortcut + residual)
       output = tf.nn.relu6(shortcut + residual)
     else:
+      #output = tf.nn.relu(fake_shortcut + residual)
       output = tf.nn.relu(shortcut + residual)
 
     return slim.utils.collect_named_outputs(outputs_collections,
@@ -149,7 +193,8 @@ def resnet_v1(inputs,
               spatial_squeeze=True,
               store_non_strided_activations=False,
               reuse=None,
-              scope=None):
+              scope=None,
+              root_initializers=None):
   """Generator for v1 ResNet models.
 
   This function generates a family of ResNet v1 models. See the resnet_v1_*()
@@ -203,6 +248,7 @@ def resnet_v1(inputs,
     reuse: whether or not the network and its variables should be reused. To be
       able to reuse 'scope' must be given.
     scope: Optional variable_scope.
+    root_initializers: Initializers for root block conv and batchnorm layers.
 
   Returns:
     net: A rank-4 tensor of size [batch, height_out, width_out, channels_out].
@@ -232,7 +278,7 @@ def resnet_v1(inputs,
             if output_stride % 4 != 0:
               raise ValueError('The output_stride needs to be a multiple of 4.')
             output_stride /= 4
-          net = resnet_utils.conv2d_same(net, 64, 7, stride=2, scope='conv1')
+          net = resnet_utils.conv2d_same(net, 64, 7, stride=2, scope='conv1', **root_initializers)
           net = slim.max_pool2d(net, [3, 3], stride=2, scope='pool1')
         net = resnet_utils.stack_blocks_dense(net, blocks, output_stride,
                                               store_non_strided_activations)
@@ -257,7 +303,7 @@ def resnet_v1(inputs,
 resnet_v1.default_image_size = 224
 
 
-def resnet_v1_block(scope, base_depth, num_units, stride):
+def resnet_v1_block(scope, base_depth, num_units, stride, initializers=None, split_model=False, insert_shift=False):
   """Helper function for creating a resnet_v1 bottleneck block.
 
   Args:
@@ -266,19 +312,26 @@ def resnet_v1_block(scope, base_depth, num_units, stride):
     num_units: The number of units in the block.
     stride: The stride of the block, implemented as a stride in the last unit.
       All other units have stride=1.
+    initializers: Initializers for conv and batchnorm layers. key "bottleneckX", for 0-indexed bottleck id X, returns list of conv initializer kwargs for that bottleneck.
+    split_model: Forwarded to block. Determines if model should be split at shift operations
+    insert_shift: If true, inserts shift operation in front of every first conv1x1 within a block.
 
   Returns:
     A resnet_v1 bottleneck block.
   """
-  return resnet_utils.Block(scope, bottleneck, [{
+  args = []
+  for i in range(num_units):
+    s = stride if i == num_units - 1 else 1
+    args.append({
       'depth': base_depth * 4,
       'depth_bottleneck': base_depth,
-      'stride': 1
-  }] * (num_units - 1) + [{
-      'depth': base_depth * 4,
-      'depth_bottleneck': base_depth,
-      'stride': stride
-  }])
+      'stride': s,
+      'initializers': initializers[f"bottleneck{i}"],
+      'split_model': split_model,
+      'insert_shift': insert_shift
+    })
+
+  return resnet_utils.Block(scope, bottleneck, args)
 
 
 def resnet_v1_50(inputs,
@@ -291,24 +344,27 @@ def resnet_v1_50(inputs,
                  min_base_depth=8,
                  depth_multiplier=1,
                  reuse=None,
-                 scope='resnet_v1_50'):
+                 scope='resnet_v1_50',
+                 initializers=None,
+                 split_model=False,
+                 insert_shift=False):
   """ResNet-50 model of [1]. See resnet_v1() for arg and return description."""
   depth_func = lambda d: max(int(d * depth_multiplier), min_base_depth)
   blocks = [
       resnet_v1_block('block1', base_depth=depth_func(64), num_units=3,
-                      stride=2),
+                      stride=2, initializers=initializers["block1"], split_model=split_model, insert_shift=insert_shift),
       resnet_v1_block('block2', base_depth=depth_func(128), num_units=4,
-                      stride=2),
+                      stride=2, initializers=initializers["block2"], split_model=split_model, insert_shift=insert_shift),
       resnet_v1_block('block3', base_depth=depth_func(256), num_units=6,
-                      stride=2),
+                      stride=2, initializers=initializers["block3"], split_model=split_model, insert_shift=insert_shift),
       resnet_v1_block('block4', base_depth=depth_func(512), num_units=3,
-                      stride=1),
+                      stride=1, initializers=initializers["block4"], split_model=split_model, insert_shift=insert_shift),
   ]
   return resnet_v1(inputs, blocks, num_classes, is_training,
                    global_pool=global_pool, output_stride=output_stride,
                    include_root_block=True, spatial_squeeze=spatial_squeeze,
                    store_non_strided_activations=store_non_strided_activations,
-                   reuse=reuse, scope=scope)
+                   reuse=reuse, scope=scope, root_initializers=initializers["root"])
 resnet_v1_50.default_image_size = resnet_v1.default_image_size
 
 

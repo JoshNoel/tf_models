@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+#
+# Modified to add initializers to expanded_conv
+
 """Convolution blocks for mobilenet."""
 import contextlib
 import functools
@@ -227,6 +230,9 @@ def expanded_conv(input_tensor,
                   depthwise_fn=slim.separable_conv2d,
                   expansion_fn=split_conv,
                   projection_fn=split_conv,
+                  depthwise_params=None,
+                  expansion_params=None,
+                  projection_params=None,
                   scope=None):
   """Depthwise Convolution Block with expansion.
 
@@ -320,7 +326,8 @@ def expanded_conv(input_tensor,
         rate=rate,
         normalizer_fn=normalizer_fn,
         padding=padding,
-        scope='depthwise')
+        scope='depthwise',
+        **depthwise_params)
     # b1 -> b2 * r -> b2
     #   i -> (o * r) (bottleneck) -> o
     input_tensor = tf.identity(input_tensor, 'input')
@@ -350,7 +357,8 @@ def expanded_conv(input_tensor,
           net,
           inner_size,
           scope='expand',
-          normalizer_fn=normalizer_fn)
+          normalizer_fn=normalizer_fn,
+          **expansion_params)
       net = tf.identity(net, 'expansion_output')
       if endpoints is not None:
         endpoints['expansion_output'] = net
@@ -378,7 +386,8 @@ def expanded_conv(input_tensor,
         num_outputs,
         scope='project',
         normalizer_fn=normalizer_fn,
-        activation_fn=project_activation_fn)
+        activation_fn=project_activation_fn,
+        **projection_params)
     if endpoints is not None:
       endpoints['projection_output'] = net
     if depthwise_location == 'output':

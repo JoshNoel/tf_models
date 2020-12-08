@@ -73,7 +73,7 @@ def subsample(inputs, factor, scope=None):
     return slim.max_pool2d(inputs, [1, 1], stride=factor, scope=scope)
 
 
-def conv2d_same(inputs, num_outputs, kernel_size, stride, rate=1, scope=None):
+def conv2d_same(inputs, num_outputs, kernel_size, stride, rate=1, scope=None, normalizer_params=None, weights_initializer=None, biases_initializer=None):
   """Strided 2-D convolution with 'SAME' padding.
 
   When stride > 1, then we do explicit zero-padding, followed by conv2d with
@@ -102,6 +102,9 @@ def conv2d_same(inputs, num_outputs, kernel_size, stride, rate=1, scope=None):
     stride: An integer, the output stride.
     rate: An integer, rate for atrous convolution.
     scope: Scope.
+    normalizer_params: normalizer parameters passed to conv2d
+    weights_initializer: Weight initializer passed to conv2d
+    biases_initializer: Biases initializer passed to conv2d
 
   Returns:
     output: A 4-D tensor of size [batch, height_out, width_out, channels] with
@@ -109,7 +112,9 @@ def conv2d_same(inputs, num_outputs, kernel_size, stride, rate=1, scope=None):
   """
   if stride == 1:
     return slim.conv2d(inputs, num_outputs, kernel_size, stride=1, rate=rate,
-                       padding='SAME', scope=scope)
+                       padding='SAME', scope=scope,
+                       normalizer_params=normalizer_params,
+                       weights_initializer=weights_initializer, biases_initializer=biases_initializer)
   else:
     kernel_size_effective = kernel_size + (kernel_size - 1) * (rate - 1)
     pad_total = kernel_size_effective - 1
@@ -119,8 +124,9 @@ def conv2d_same(inputs, num_outputs, kernel_size, stride, rate=1, scope=None):
         tensor=inputs,
         paddings=[[0, 0], [pad_beg, pad_end], [pad_beg, pad_end], [0, 0]])
     return slim.conv2d(inputs, num_outputs, kernel_size, stride=stride,
-                       rate=rate, padding='VALID', scope=scope)
-
+                       rate=rate, padding='VALID', scope=scope,
+                       normalizer_params=normalizer_params,
+                       weights_initializer=weights_initializer, biases_initializer=biases_initializer)
 
 @slim.add_arg_scope
 def stack_blocks_dense(net, blocks, output_stride=None,
